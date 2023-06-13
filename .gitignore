@@ -19,3 +19,6 @@
 
 # Go workspace file
 go.work
+headview
+bin/headview_darwin
+bin/headview_darwin_arm64
