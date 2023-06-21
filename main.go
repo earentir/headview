@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -21,31 +24,40 @@ type resource struct {
 	Type string
 }
 
-var appVersion = "0.1.5"
+var appVersion = "0.1.9"
 
 func main() {
-	// Parse command line arguments
-	urlArg := flag.String("url", "", "URL to send the HTTP HEAD request to")
-	sizeArg := flag.Bool("size", false, "Calculate size of resources")
-	verArg := flag.Bool("v", false, "Print version information")
-	flag.Parse()
+	// Check if URL is provided
+	if len(os.Args) < 2 {
+		fmt.Println("Please provide a URL as the first argument.")
+		return
+	}
+
+	// Get URL from the first argument
+	urlArg := os.Args[1]
+
+	// Create a new flag set to parse the remaining arguments
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	// Define the rest of your flags
+	statisticsArg := flags.Bool("stats", false, "Print statistics Only")
+	sizeArg := flags.Bool("size", false, "Calculate size of resources")
+	verArg := flags.Bool("v", false, "Print version information")
+
+	// Parse the remaining command line arguments
+	flags.Parse(os.Args[2:])
 
 	if *verArg {
 		fmt.Printf(aurora.Sprintf(aurora.Green("headview v%s\n"), aurora.Yellow(appVersion)))
 		return
 	}
 
-	if *urlArg == "" {
-		fmt.Println(aurora.Green("Please provide a URL using the -url flag."))
-		return
-	}
-
 	client := createHTTPClient()
 
 	if *sizeArg {
-		performGetSize(client, *urlArg)
+		performGetSize(client, urlArg)
 	} else {
-		performGetRequest(client, *urlArg)
+		performGetRequest(client, urlArg, *statisticsArg)
 	}
 }
 
@@ -75,31 +87,54 @@ func performGetSize(client *http.Client, urlArg string) {
 	calculateSize(resp, client)
 }
 
-func performGetRequest(client *http.Client, urlArg string) {
+func performGetRequest(client *http.Client, urlArg string, statisticsArg bool) {
 	req, err := http.NewRequest("HEAD", urlArg, nil)
 	if err != nil {
 		fmt.Println(aurora.Green("Error creating request:"), aurora.Blue(err))
 		return
 	}
 
+	start := time.Now()
 	trace := createHTTPTrace()
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	start := time.Now()
+
+	requestSendingStart := time.Now()
 	resp, err := client.Do(req)
+	requestSendingTime := time.Since(requestSendingStart)
+
 	if err != nil {
 		fmt.Println(aurora.Red("Error sending request:"), aurora.Red(err))
 	} else {
 		defer resp.Body.Close()
-		printResponse(start, resp)
+		printResponse(start, resp, requestSendingTime, statisticsArg)
 	}
 }
 
+func formatDuration(d time.Duration) string {
+	durationStr := d.String()
+	re := regexp.MustCompile(`([0-9\.]+)(\D+)`)
+	matches := re.FindStringSubmatch(durationStr)
+
+	if len(matches) < 3 {
+		return durationStr
+	}
+
+	durationVal, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return durationStr
+	}
+
+	formattedDurationVal := fmt.Sprintf("%.2f", durationVal)
+	return fmt.Sprintf("%s%s", formattedDurationVal, matches[2])
+}
+
 func createHTTPTrace() *httptrace.ClientTrace {
-	var start, connect, dns, tlsHandshake time.Time
+	var traceStart, connect, dns, tlsHandshake time.Time
 	return &httptrace.ClientTrace{
 		DNSStart: func(_ httptrace.DNSStartInfo) { dns = time.Now() },
 		DNSDone: func(_ httptrace.DNSDoneInfo) {
-			fmt.Printf("DNS lookup duration: %v\n", time.Since(dns))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup duration"), formatDuration(time.Since(dns)))
+
 		},
 		ConnectStart: func(_, _ string) { connect = time.Now() },
 		ConnectDone: func(_, _ string, err error) {
@@ -107,20 +142,28 @@ func createHTTPTrace() *httptrace.ClientTrace {
 				fmt.Printf("Error during connection: %v\n", err)
 				return
 			}
-			fmt.Printf("TCP connection duration: %v\n", time.Since(connect))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection duration"), formatDuration(time.Since(connect)))
 		},
 		TLSHandshakeStart: func() { tlsHandshake = time.Now() },
 		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
-			fmt.Printf("TLS handshake duration: %v\n", time.Since(tlsHandshake))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake duration"), formatDuration(time.Since(tlsHandshake)))
 		},
 		GotFirstResponseByte: func() {
-			fmt.Printf("Time to first byte: %v\n", time.Since(start))
+			traceStart = time.Now()
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("Time to first byte"), formatDuration(time.Since(traceStart)))
 		},
 	}
 }
 
-func printResponse(start time.Time, resp *http.Response) {
-	fmt.Println(aurora.Green("Total request duration:"), aurora.Blue(time.Since(start)))
+func printResponse(start time.Time, resp *http.Response, requestSendingTime time.Duration, statisticsArg bool) {
+	ttfb := time.Since(start)
+	serverProcessingTime := ttfb - requestSendingTime
+
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Request sending time"), formatDuration(requestSendingTime))
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Server processing time"), formatDuration(serverProcessingTime))
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Total request duration"), formatDuration(time.Since(start)))
+
+	fmt.Println()
 	fmt.Println(aurora.Green("Response status:"), aurora.Blue(resp.Status))
 	if lastMod, ok := resp.Header["Last-Modified"]; ok {
 		fmt.Println(aurora.Green("Last Modified:"), aurora.Blue(lastMod))
@@ -128,12 +171,26 @@ func printResponse(start time.Time, resp *http.Response) {
 		fmt.Println(aurora.Green("Last Modified header not present"))
 	}
 	fmt.Println()
-	fmt.Println(aurora.Green("Response headers:"))
-	for key, values := range resp.Header {
-		for _, value := range values {
-			fmt.Println(aurora.Green(key+": "), aurora.Blue(value))
+
+	if !statisticsArg {
+		fmt.Println(aurora.Green("Response headers:"))
+		for key, values := range resp.Header {
+			for _, value := range values {
+				fmt.Println(aurora.Green(key+": "), aurora.Blue(value))
+			}
 		}
 	}
+
+	// Calculate content download time
+	contentDownloadStart := time.Now()
+	_, err := io.ReadAll(resp.Body)
+	contentDownloadTime := time.Since(contentDownloadStart)
+	if err != nil {
+		fmt.Println(aurora.Red("Error reading response body:"), aurora.Red(err))
+		return
+	}
+
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Content download time"), formatDuration(contentDownloadTime))
 }
 
 func calculateSize(resp *http.Response, client *http.Client) {
