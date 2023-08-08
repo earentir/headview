@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/guptarohit/asciigraph"
 	"github.com/logrusorgru/aurora"
 )
 
@@ -37,7 +38,7 @@ type resource struct {
 	Type string
 }
 
-var appVersion = "0.1.12"
+var appVersion = "0.1.15"
 var timeStats timmings
 
 func main() {
@@ -93,6 +94,47 @@ func main() {
 	fmt.Printf("%25s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
 	fmt.Printf("%25s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
 	fmt.Printf("%25s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
+
+	graph := asciigraph.Plot(timeStats.ExtractDurations())
+	fmt.Println(graph)
+}
+
+func (t *timmings) ExtractDurations() []float64 {
+	var durations []float64
+	for _, common := range t.CommonTimmings {
+		durations = append(durations,
+			common.DNSLookupTime.Seconds(),
+			common.TCPConnTime.Seconds(),
+			common.TLSHandshakeTime.Seconds(),
+			common.TTFB.Seconds(),
+		)
+	}
+	durations = append(durations,
+		t.RequestSendingTime.Seconds(),
+		t.ServerProcessingTime.Seconds(),
+		t.TotalRequestTime.Seconds(),
+		t.ContentTransferTime.Seconds(),
+	)
+	return durations
+}
+
+// StringsToFloats converts a slice of strings to a slice of float64.
+// For each string that can't be converted, it appends 0 to the float slice.
+// Only the last error encountered is returned (if any).
+func stringsToFloats(s []string) ([]float64, error) {
+	var floats []float64
+	var lastError error
+
+	for _, str := range s {
+		val, err := strconv.ParseFloat(str, 64)
+		if err != nil {
+			lastError = fmt.Errorf("failed to convert string %q to float: %v", str, err)
+			val = 0.0
+		}
+		floats = append(floats, val)
+	}
+
+	return floats, lastError
 }
 
 func addDefaultProtocol(s string) string {
@@ -110,22 +152,6 @@ func createHTTPClient() *http.Client {
 			},
 		},
 	}
-}
-
-func performGetSize(client *http.Client, urlArg string) {
-	req, err := http.NewRequest("GET", urlArg, nil)
-	if err != nil {
-		fmt.Println(aurora.Green("Error creating request for size calculation:"), aurora.Blue(err))
-		return
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println(aurora.Red("Error sending request for size calculation:"), aurora.Red(err))
-		return
-	}
-	defer resp.Body.Close()
-
-	calculateSize(resp, client)
 }
 
 func performGetRequest(client *http.Client, urlArg string, headersArg bool) {
