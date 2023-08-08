@@ -1,22 +1,35 @@
 package main
 
 import (
-	"bytes"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/logrusorgru/aurora"
 )
+
+type timmings struct {
+	CommonTimmings       []timmingsCommon
+	RequestSendingTime   time.Duration
+	ServerProcessingTime time.Duration
+	TotalRequestTime     time.Duration
+	ContentTransferTime  time.Duration
+}
+
+type timmingsCommon struct {
+	DNSLookupTime    time.Duration
+	TCPConnTime      time.Duration
+	TLSHandshakeTime time.Duration
+	TTFB             time.Duration
+}
 
 type resource struct {
 	URL  string
@@ -24,7 +37,8 @@ type resource struct {
 	Type string
 }
 
-var appVersion = "0.1.9"
+var appVersion = "0.1.12"
+var timeStats timmings
 
 func main() {
 	// Check if URL is provided
@@ -34,13 +48,13 @@ func main() {
 	}
 
 	// Get URL from the first argument
-	urlArg := os.Args[1]
+	urlArg := addDefaultProtocol(os.Args[1])
 
 	// Create a new flag set to parse the remaining arguments
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
 	// Define the rest of your flags
-	statisticsArg := flags.Bool("stats", false, "Print statistics Only")
+	headersArg := flags.Bool("headers", false, "Print headers")
 	sizeArg := flags.Bool("size", false, "Calculate size of resources")
 	verArg := flags.Bool("v", false, "Print version information")
 
@@ -57,8 +71,35 @@ func main() {
 	if *sizeArg {
 		performGetSize(client, urlArg)
 	} else {
-		performGetRequest(client, urlArg, *statisticsArg)
+		performGetRequest(client, urlArg, *headersArg)
 	}
+
+	//print time stats
+	if len(timeStats.CommonTimmings) > 1 {
+		for _, t := range timeStats.CommonTimmings {
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(t.DNSLookupTime))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(t.TCPConnTime))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(t.TLSHandshakeTime))
+			fmt.Printf("%25s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(t.TTFB))
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(timeStats.CommonTimmings[0].DNSLookupTime))
+		fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(timeStats.CommonTimmings[0].TCPConnTime))
+		fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(timeStats.CommonTimmings[0].TLSHandshakeTime))
+		fmt.Printf("%25s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(timeStats.CommonTimmings[0].TTFB))
+	}
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Request sending"), formatDuration(timeStats.RequestSendingTime))
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
+	fmt.Printf("%25s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
+}
+
+func addDefaultProtocol(s string) string {
+	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		return "https://" + s
+	}
+	return s
 }
 
 func createHTTPClient() *http.Client {
@@ -87,11 +128,18 @@ func performGetSize(client *http.Client, urlArg string) {
 	calculateSize(resp, client)
 }
 
-func performGetRequest(client *http.Client, urlArg string, statisticsArg bool) {
+func performGetRequest(client *http.Client, urlArg string, headersArg bool) {
 	req, err := http.NewRequest("HEAD", urlArg, nil)
 	if err != nil {
 		fmt.Println(aurora.Green("Error creating request:"), aurora.Blue(err))
 		return
+	}
+
+	fmt.Println(aurora.Magenta("Requesting URL:"), aurora.Cyan(urlArg))
+
+	// Disable auto-redirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	start := time.Now()
@@ -104,9 +152,21 @@ func performGetRequest(client *http.Client, urlArg string, statisticsArg bool) {
 
 	if err != nil {
 		fmt.Println(aurora.Red("Error sending request:"), aurora.Red(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	// Check if a redirect response is received
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location, err := resp.Location()
+		if err != nil {
+			fmt.Println(aurora.Red("Error reading redirect location:"), aurora.Red(err))
+			return
+		}
+		fmt.Println(aurora.Magenta("Redirecting to:"), aurora.Cyan(location.String()))
+		performGetRequest(client, location.String(), headersArg)
 	} else {
-		defer resp.Body.Close()
-		printResponse(start, resp, requestSendingTime, statisticsArg)
+		printResponse(start, resp, requestSendingTime, headersArg)
 	}
 }
 
@@ -130,38 +190,52 @@ func formatDuration(d time.Duration) string {
 
 func createHTTPTrace() *httptrace.ClientTrace {
 	var traceStart, connect, dns, tlsHandshake time.Time
-	return &httptrace.ClientTrace{
-		DNSStart: func(_ httptrace.DNSStartInfo) { dns = time.Now() },
-		DNSDone: func(_ httptrace.DNSDoneInfo) {
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup duration"), formatDuration(time.Since(dns)))
+	var times timmingsCommon
 
+	return &httptrace.ClientTrace{
+		DNSStart: func(_ httptrace.DNSStartInfo) {
+			dns = time.Now()
+			fmt.Println(aurora.Magenta("DNS lookup started."))
 		},
-		ConnectStart: func(_, _ string) { connect = time.Now() },
+		DNSDone: func(_ httptrace.DNSDoneInfo) {
+			times.DNSLookupTime = time.Since(dns)
+		},
+		ConnectStart: func(_, _ string) {
+			connect = time.Now()
+			fmt.Println(aurora.Magenta("TCP connection started."))
+		},
 		ConnectDone: func(_, _ string, err error) {
 			if err != nil {
 				fmt.Printf("Error during connection: %v\n", err)
 				return
 			}
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection duration"), formatDuration(time.Since(connect)))
+			times.TCPConnTime = time.Since(connect)
 		},
-		TLSHandshakeStart: func() { tlsHandshake = time.Now() },
+		TLSHandshakeStart: func() {
+			tlsHandshake = time.Now()
+			fmt.Println(aurora.Magenta("TLS handshake started."))
+		},
 		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake duration"), formatDuration(time.Since(tlsHandshake)))
+			times.TLSHandshakeTime = time.Since(tlsHandshake)
 		},
 		GotFirstResponseByte: func() {
 			traceStart = time.Now()
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("Time to first byte"), formatDuration(time.Since(traceStart)))
+			fmt.Println(aurora.Magenta("Received first response byte."))
+			times.TTFB = time.Since(traceStart)
+
+			//assuming last activity is reading the body so we append
+			timeStats.CommonTimmings = append(timeStats.CommonTimmings, times)
 		},
 	}
 }
 
-func printResponse(start time.Time, resp *http.Response, requestSendingTime time.Duration, statisticsArg bool) {
+func printResponse(start time.Time, resp *http.Response, requestSendingTime time.Duration, headersArg bool) {
 	ttfb := time.Since(start)
 	serverProcessingTime := ttfb - requestSendingTime
 
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Request sending time"), formatDuration(requestSendingTime))
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Server processing time"), formatDuration(serverProcessingTime))
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Total request duration"), formatDuration(time.Since(start)))
+	timeStats.RequestSendingTime = requestSendingTime
+	timeStats.ServerProcessingTime = serverProcessingTime
+	timeStats.TotalRequestTime = time.Since(start)
 
 	fmt.Println()
 	fmt.Println(aurora.Green("Response status:"), aurora.Blue(resp.Status))
@@ -172,7 +246,7 @@ func printResponse(start time.Time, resp *http.Response, requestSendingTime time
 	}
 	fmt.Println()
 
-	if !statisticsArg {
+	if headersArg {
 		fmt.Println(aurora.Green("Response headers:"))
 		for key, values := range resp.Header {
 			for _, value := range values {
@@ -184,103 +258,11 @@ func printResponse(start time.Time, resp *http.Response, requestSendingTime time
 	// Calculate content download time
 	contentDownloadStart := time.Now()
 	_, err := io.ReadAll(resp.Body)
-	contentDownloadTime := time.Since(contentDownloadStart)
+	contentTransferTime := time.Since(contentDownloadStart)
 	if err != nil {
 		fmt.Println(aurora.Red("Error reading response body:"), aurora.Red(err))
 		return
 	}
 
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Content download time"), formatDuration(contentDownloadTime))
-}
-
-func calculateSize(resp *http.Response, client *http.Client) {
-	resourceMap := make(map[string][]resource)
-	baseURL, err := url.Parse(resp.Request.URL.String())
-	if err != nil {
-		fmt.Println(aurora.Red("Error parsing base URL:"), aurora.Red(err))
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println(aurora.Red("Error reading response body:"), aurora.Red(err))
-		return
-	}
-
-	// Add the page itself as a resource
-	pageResource := resource{
-		URL:  resp.Request.URL.String(),
-		Size: int64(len(body)),
-		Type: resp.Header.Get("Content-Type"),
-	}
-	resourceMap[pageResource.Type] = append(resourceMap[pageResource.Type], pageResource)
-
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
-	if err != nil {
-		fmt.Println(aurora.Red("Error parsing HTML:"), aurora.Red(err))
-		return
-	}
-
-	// Find links to other resources
-	doc.Find("link[href], script[src], img[src]").Each(func(i int, s *goquery.Selection) {
-		link, exists := s.Attr("href")
-		if !exists {
-			link, exists = s.Attr("src")
-		}
-
-		if exists {
-			resource := fetchResource(link, baseURL, client)
-			if resource != nil {
-				resourceMap[resource.Type] = append(resourceMap[resource.Type], *resource)
-			}
-		}
-	})
-
-	// Print resource sizes
-	var totalSize int64
-	for resType, resources := range resourceMap {
-		fmt.Println(aurora.Green("Type:"), aurora.Blue(resType))
-		var typeTotalSize int64
-		for _, resource := range resources {
-			fmt.Println(aurora.Green(resource.URL), aurora.Blue(resource.Size))
-			typeTotalSize += resource.Size
-			totalSize += resource.Size
-		}
-		fmt.Println(aurora.Green("Total size for this type:"), aurora.Blue(typeTotalSize))
-	}
-	fmt.Println(aurora.Green("Total size for all resources:"), aurora.Blue(totalSize))
-}
-
-func fetchResource(link string, baseURL *url.URL, client *http.Client) *resource {
-	resourceURL, err := url.Parse(link)
-	if err != nil {
-		fmt.Println(aurora.Red("Error parsing resource URL:"), aurora.Red(err))
-		return nil
-	}
-
-	fullURL := baseURL.ResolveReference(resourceURL)
-	req, err := http.NewRequest("GET", fullURL.String(), nil)
-	if err != nil {
-		fmt.Println(aurora.Red("Error creating request for resource:"), aurora.Red(err))
-		return nil
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println(aurora.Red("Error fetching resource:"), aurora.Red(err))
-		return nil
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println(aurora.Red("Error reading resource body:"), aurora.Red(err))
-		return nil
-	}
-
-	return &resource{
-		URL:  fullURL.String(),
-		Size: int64(len(body)),
-		Type: resp.Header.Get("Content-Type"),
-	}
+	timeStats.ContentTransferTime = contentTransferTime
 }
