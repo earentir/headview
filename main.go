@@ -17,30 +17,6 @@ import (
 	"github.com/logrusorgru/aurora"
 )
 
-type timmings struct {
-	CommonTimmings       []timmingsCommon
-	RequestSendingTime   time.Duration
-	ServerProcessingTime time.Duration
-	TotalRequestTime     time.Duration
-	ContentTransferTime  time.Duration
-}
-
-type timmingsCommon struct {
-	DNSLookupTime    time.Duration
-	TCPConnTime      time.Duration
-	TLSHandshakeTime time.Duration
-	TTFB             time.Duration
-}
-
-type resource struct {
-	URL  string
-	Size int64
-	Type string
-}
-
-var appVersion = "0.1.15"
-var timeStats timmings
-
 func main() {
 	// Check if URL is provided
 	if len(os.Args) < 2 {
@@ -73,46 +49,55 @@ func main() {
 		performGetSize(client, urlArg)
 	} else {
 		performGetRequest(client, urlArg, *headersArg)
-
-		fmt.Println("Connection")
-
 		//print time stats
+		printTimmingStats()
+	}
 
-		//Connection Timmings
-		if len(timeStats.CommonTimmings) > 1 {
-			for _, t := range timeStats.CommonTimmings {
-				fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(t.DNSLookupTime))
-				fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(t.TCPConnTime))
-				fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(t.TLSHandshakeTime))
-				fmt.Printf("%20s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(t.TTFB))
-				fmt.Println()
-			}
+}
 
-		} else {
-			reqgraph := asciigraph.Plot(timeStats.ExtractConnectionDurations())
+func printTimmingStats() {
+	fmt.Println(aurora.Green(("Connection")))
 
-			fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(timeStats.CommonTimmings[0].DNSLookupTime))
-			fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(timeStats.CommonTimmings[0].TCPConnTime))
-			fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(timeStats.CommonTimmings[0].TLSHandshakeTime))
-			fmt.Printf("%20s %-10s\n", aurora.Yellow("TTFB"), formatDuration(timeStats.CommonTimmings[0].TTFB))
+	//Connection Timmings
+	if len(timeStats.CommonTimmings) > 1 {
+		var multireqgraph [][]float64
 
-			fmt.Println(reqgraph)
+		for _, t := range timeStats.CommonTimmings {
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(t.DNSLookupTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(t.TCPConnTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(t.TLSHandshakeTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(t.TTFB))
 			fmt.Println()
+			multireqgraph = append(multireqgraph, []float64{t.DNSLookupTime.Seconds(), t.TCPConnTime.Seconds(), t.TLSHandshakeTime.Seconds(), t.TTFB.Seconds()})
 		}
 
-		//Request Timmings
-		fmt.Println("Request")
-		reqgraph := asciigraph.Plot(timeStats.ExtractDurations())
+		graph := asciigraph.PlotMany(multireqgraph, asciigraph.Height(10), asciigraph.SeriesColors(asciigraph.White, asciigraph.Blue))
+		fmt.Println(graph)
+		fmt.Println()
+	} else {
+		reqgraph := asciigraph.Plot(timeStats.ExtractConnectionDurations())
 
-		fmt.Printf("%20s %-10s\n", aurora.Yellow("Request sending"), formatDuration(timeStats.RequestSendingTime))
-		fmt.Printf("%20s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
-		fmt.Printf("%20s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(timeStats.CommonTimmings[0].DNSLookupTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(timeStats.CommonTimmings[0].TCPConnTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(timeStats.CommonTimmings[0].TLSHandshakeTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("TTFB"), formatDuration(timeStats.CommonTimmings[0].TTFB))
 
 		fmt.Println(reqgraph)
-
 		fmt.Println()
-		fmt.Printf("%20s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
 	}
+
+	//Request Timmings
+	fmt.Println(aurora.Green(("Request")))
+	reqgraph := asciigraph.Plot(timeStats.ExtractDurations())
+
+	fmt.Printf("%20s %-10s\n", aurora.Yellow("Request sending"), formatDuration(timeStats.RequestSendingTime))
+	fmt.Printf("%20s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
+	fmt.Printf("%20s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
+
+	fmt.Println(reqgraph)
+
+	fmt.Println()
+	fmt.Printf("%20s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
 }
 
 func (t *timmings) ExtractConnectionDurations() []float64 {
@@ -133,7 +118,7 @@ func (t *timmings) ExtractDurations() []float64 {
 	durations = append(durations,
 		t.RequestSendingTime.Seconds(),
 		t.ServerProcessingTime.Seconds(),
-		t.TotalRequestTime.Seconds(),
+		// t.TotalRequestTime.Seconds(),
 		t.ContentTransferTime.Seconds(),
 	)
 	return durations
