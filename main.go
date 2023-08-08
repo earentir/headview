@@ -73,33 +73,49 @@ func main() {
 		performGetSize(client, urlArg)
 	} else {
 		performGetRequest(client, urlArg, *headersArg)
-	}
 
-	//print time stats
-	if len(timeStats.CommonTimmings) > 1 {
-		for _, t := range timeStats.CommonTimmings {
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(t.DNSLookupTime))
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(t.TCPConnTime))
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(t.TLSHandshakeTime))
-			fmt.Printf("%25s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(t.TTFB))
+		fmt.Println("Connection")
+
+		//print time stats
+
+		//Connection Timmings
+		if len(timeStats.CommonTimmings) > 1 {
+			for _, t := range timeStats.CommonTimmings {
+				fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(t.DNSLookupTime))
+				fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(t.TCPConnTime))
+				fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(t.TLSHandshakeTime))
+				fmt.Printf("%20s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(t.TTFB))
+				fmt.Println()
+			}
+
+		} else {
+			reqgraph := asciigraph.Plot(timeStats.ExtractConnectionDurations())
+
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(timeStats.CommonTimmings[0].DNSLookupTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(timeStats.CommonTimmings[0].TCPConnTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(timeStats.CommonTimmings[0].TLSHandshakeTime))
+			fmt.Printf("%20s %-10s\n", aurora.Yellow("TTFB"), formatDuration(timeStats.CommonTimmings[0].TTFB))
+
+			fmt.Println(reqgraph)
 			fmt.Println()
 		}
-	} else {
-		fmt.Printf("%25s %-10s\n", aurora.Yellow("DNS lookup"), formatDuration(timeStats.CommonTimmings[0].DNSLookupTime))
-		fmt.Printf("%25s %-10s\n", aurora.Yellow("TCP connection"), formatDuration(timeStats.CommonTimmings[0].TCPConnTime))
-		fmt.Printf("%25s %-10s\n", aurora.Yellow("TLS handshake"), formatDuration(timeStats.CommonTimmings[0].TLSHandshakeTime))
-		fmt.Printf("%25s %-10s\n", aurora.Yellow("Time To First Byte"), formatDuration(timeStats.CommonTimmings[0].TTFB))
-	}
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Request sending"), formatDuration(timeStats.RequestSendingTime))
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
-	fmt.Printf("%25s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
 
-	graph := asciigraph.Plot(timeStats.ExtractDurations())
-	fmt.Println(graph)
+		//Request Timmings
+		fmt.Println("Request")
+		reqgraph := asciigraph.Plot(timeStats.ExtractDurations())
+
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("Request sending"), formatDuration(timeStats.RequestSendingTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("Server processing"), formatDuration(timeStats.ServerProcessingTime))
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("Content transfer"), formatDuration(timeStats.ContentTransferTime))
+
+		fmt.Println(reqgraph)
+
+		fmt.Println()
+		fmt.Printf("%20s %-10s\n", aurora.Yellow("Total request"), formatDuration(timeStats.TotalRequestTime))
+	}
 }
 
-func (t *timmings) ExtractDurations() []float64 {
+func (t *timmings) ExtractConnectionDurations() []float64 {
 	var durations []float64
 	for _, common := range t.CommonTimmings {
 		durations = append(durations,
@@ -109,6 +125,11 @@ func (t *timmings) ExtractDurations() []float64 {
 			common.TTFB.Seconds(),
 		)
 	}
+	return durations
+}
+
+func (t *timmings) ExtractDurations() []float64 {
+	var durations []float64
 	durations = append(durations,
 		t.RequestSendingTime.Seconds(),
 		t.ServerProcessingTime.Seconds(),
