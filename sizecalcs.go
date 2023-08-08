@@ -11,6 +11,22 @@ import (
 	"github.com/logrusorgru/aurora"
 )
 
+func performGetSize(client *http.Client, urlArg string) {
+	req, err := http.NewRequest("GET", urlArg, nil)
+	if err != nil {
+		fmt.Println(aurora.Green("Error creating request for size calculation:"), aurora.Blue(err))
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println(aurora.Red("Error sending request for size calculation:"), aurora.Red(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	calculateSize(resp, client)
+}
+
 func calculateSize(resp *http.Response, client *http.Client) {
 	resourceMap := make(map[string][]resource)
 	baseURL, err := url.Parse(resp.Request.URL.String())
